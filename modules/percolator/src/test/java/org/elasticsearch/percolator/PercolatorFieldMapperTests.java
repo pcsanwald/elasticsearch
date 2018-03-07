@@ -32,6 +32,7 @@ import org.apache.lucene.index.Term;
 import org.apache.lucene.index.memory.MemoryIndex;
 import org.apache.lucene.search.BooleanClause.Occur;
 import org.apache.lucene.search.BooleanQuery;
+import org.apache.lucene.search.CoveringQuery;
 import org.apache.lucene.search.PhraseQuery;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.search.TermInSetQuery;
@@ -39,6 +40,7 @@ import org.apache.lucene.search.TermQuery;
 import org.apache.lucene.search.TermRangeQuery;
 import org.apache.lucene.search.join.ScoreMode;
 import org.apache.lucene.util.BytesRef;
+import org.elasticsearch.Version;
 import org.elasticsearch.action.support.PlainActionFuture;
 import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.collect.Tuple;
@@ -98,8 +100,10 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
+import java.util.stream.Collectors;
 
 import static org.elasticsearch.common.xcontent.XContentFactory.jsonBuilder;
+import static org.elasticsearch.index.query.QueryBuilders.boolQuery;
 import static org.elasticsearch.index.query.QueryBuilders.matchAllQuery;
 import static org.elasticsearch.index.query.QueryBuilders.matchPhraseQuery;
 import static org.elasticsearch.index.query.QueryBuilders.matchQuery;
@@ -114,7 +118,6 @@ import static org.elasticsearch.percolator.PercolatorFieldMapper.EXTRACTION_PART
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.instanceOf;
-import static org.hamcrest.Matchers.is;
 
 public class PercolatorFieldMapperTests extends ESSingleNodeTestCase {
 
@@ -155,7 +158,7 @@ public class PercolatorFieldMapperTests extends ESSingleNodeTestCase {
                 .startObject("number_field7").field("type", "ip").endObject()
                 .startObject("date_field").field("type", "date").endObject()
             .endObject().endObject().endObject().string();
-        mapperService.merge("doc", new CompressedXContent(mapper), MapperService.MergeReason.MAPPING_UPDATE, false);
+        mapperService.merge("doc", new CompressedXContent(mapper), MapperService.MergeReason.MAPPING_UPDATE);
     }
 
     private void addQueryFieldMappings() throws Exception {
@@ -163,7 +166,7 @@ public class PercolatorFieldMapperTests extends ESSingleNodeTestCase {
         String percolatorMapper = XContentFactory.jsonBuilder().startObject().startObject("doc")
                 .startObject("properties").startObject(fieldName).field("type", "percolator").endObject().endObject()
                 .endObject().endObject().string();
-        mapperService.merge("doc", new CompressedXContent(percolatorMapper), MapperService.MergeReason.MAPPING_UPDATE, false);
+        mapperService.merge("doc", new CompressedXContent(percolatorMapper), MapperService.MergeReason.MAPPING_UPDATE);
         fieldType = (PercolatorFieldMapper.FieldType) mapperService.fullName(fieldName);
     }
 
@@ -304,7 +307,7 @@ public class PercolatorFieldMapperTests extends ESSingleNodeTestCase {
         assertThat(document.getField(fieldType.extractionResultField.name()).stringValue(), equalTo(EXTRACTION_PARTIAL));
     }
 
-    public void testCreateCandidateQuery() throws Exception {
+    public void testExtractTermsAndRanges() throws Exception {
         addQueryFieldMappings();
 
         MemoryIndex memoryIndex = new MemoryIndex(false);
@@ -316,60 +319,87 @@ public class PercolatorFieldMapperTests extends ESSingleNodeTestCase {
 
         IndexReader indexReader = memoryIndex.createSearcher().getIndexReader();
 
-        Tuple<List<Query>, Boolean> t = fieldType.createCandidateQueryClauses(indexReader);
-        assertTrue(t.v2());
-        List<Query> clauses = t.v1();
-        clauses.sort(Comparator.comparing(Query::toString));
-        assertEquals(15, clauses.size());
-        assertEquals(fieldType.queryTermsField.name() + ":_field3\u0000me", clauses.get(0).toString());
-        assertEquals(fieldType.queryTermsField.name() + ":_field3\u0000unhide", clauses.get(1).toString());
-        assertEquals(fieldType.queryTermsField.name() + ":field1\u0000brown", clauses.get(2).toString());
-        assertEquals(fieldType.queryTermsField.name() + ":field1\u0000dog", clauses.get(3).toString());
-        assertEquals(fieldType.queryTermsField.name() + ":field1\u0000fox", clauses.get(4).toString());
-        assertEquals(fieldType.queryTermsField.name() + ":field1\u0000jumps", clauses.get(5).toString());
-        assertEquals(fieldType.queryTermsField.name() + ":field1\u0000lazy", clauses.get(6).toString());
-        assertEquals(fieldType.queryTermsField.name() + ":field1\u0000over", clauses.get(7).toString());
-        assertEquals(fieldType.queryTermsField.name() + ":field1\u0000quick", clauses.get(8).toString());
-        assertEquals(fieldType.queryTermsField.name() + ":field1\u0000the", clauses.get(9).toString());
-        assertEquals(fieldType.queryTermsField.name() + ":field2\u0000more", clauses.get(10).toString());
-        assertEquals(fieldType.queryTermsField.name() + ":field2\u0000some", clauses.get(11).toString());
-        assertEquals(fieldType.queryTermsField.name() + ":field2\u0000text", clauses.get(12).toString());
-        assertEquals(fieldType.queryTermsField.name() + ":field4\u0000123", clauses.get(13).toString());
-        assertThat(clauses.get(14).toString(), containsString(fieldName + ".range_field:<ranges:"));
+        Tuple<List<BytesRef>, Map<String, List<byte[]>>> t = fieldType.extractTermsAndRanges(indexReader);
+        assertEquals(1, t.v2().size());
+        Map<String, List<byte[]>> rangesMap = t.v2();
+        assertEquals(1, rangesMap.size());
+
+        List<byte[]> range = rangesMap.get("number_field2");
+        assertNotNull(range);
+        assertEquals(10, LongPoint.decodeDimension(range.get(0), 0));
+        assertEquals(10, LongPoint.decodeDimension(range.get(1), 0));
+
+        List<BytesRef> terms = t.v1();
+        terms.sort(BytesRef::compareTo);
+        assertEquals(14, terms.size());
+        assertEquals("_field3\u0000me", terms.get(0).utf8ToString());
+        assertEquals("_field3\u0000unhide", terms.get(1).utf8ToString());
+        assertEquals("field1\u0000brown", terms.get(2).utf8ToString());
+        assertEquals("field1\u0000dog", terms.get(3).utf8ToString());
+        assertEquals("field1\u0000fox", terms.get(4).utf8ToString());
+        assertEquals("field1\u0000jumps", terms.get(5).utf8ToString());
+        assertEquals("field1\u0000lazy", terms.get(6).utf8ToString());
+        assertEquals("field1\u0000over", terms.get(7).utf8ToString());
+        assertEquals("field1\u0000quick", terms.get(8).utf8ToString());
+        assertEquals("field1\u0000the", terms.get(9).utf8ToString());
+        assertEquals("field2\u0000more", terms.get(10).utf8ToString());
+        assertEquals("field2\u0000some", terms.get(11).utf8ToString());
+        assertEquals("field2\u0000text", terms.get(12).utf8ToString());
+        assertEquals("field4\u0000123", terms.get(13).utf8ToString());
     }
 
 
-    public void testCreateCandidateQuery_largeDocument() throws Exception {
+    public void testCreateCandidateQuery() throws Exception {
         addQueryFieldMappings();
 
         MemoryIndex memoryIndex = new MemoryIndex(false);
         StringBuilder text = new StringBuilder();
-        for (int i = 0; i < 1023; i++) {
+        for (int i = 0; i < 1022; i++) {
             text.append(i).append(' ');
         }
         memoryIndex.addField("field1", text.toString(), new WhitespaceAnalyzer());
         memoryIndex.addField(new LongPoint("field2", 10L), new WhitespaceAnalyzer());
         IndexReader indexReader = memoryIndex.createSearcher().getIndexReader();
 
-        Tuple<List<Query>, Boolean> t = fieldType.createCandidateQueryClauses(indexReader);
+        Tuple<BooleanQuery, Boolean> t = fieldType.createCandidateQuery(indexReader, Version.CURRENT);
         assertTrue(t.v2());
-        List<Query> clauses = t.v1();
-        assertEquals(1024, clauses.size());
-        assertThat(clauses.get(1023).toString(), containsString(fieldName + ".range_field:<ranges:"));
+        assertEquals(2, t.v1().clauses().size());
+        assertThat(t.v1().clauses().get(0).getQuery(), instanceOf(CoveringQuery.class));
+        assertThat(t.v1().clauses().get(1).getQuery(), instanceOf(TermQuery.class));
 
         // Now push it over the edge, so that it falls back using TermInSetQuery
         memoryIndex.addField("field2", "value", new WhitespaceAnalyzer());
         indexReader = memoryIndex.createSearcher().getIndexReader();
-        t = fieldType.createCandidateQueryClauses(indexReader);
+        t = fieldType.createCandidateQuery(indexReader, Version.CURRENT);
         assertFalse(t.v2());
-        clauses = t.v1();
-        assertEquals(2, clauses.size());
-        TermInSetQuery termInSetQuery = (TermInSetQuery) clauses.get(0);
-        assertEquals(1024, termInSetQuery.getTermData().size());
-        assertThat(clauses.get(1).toString(), containsString(fieldName + ".range_field:<ranges:"));
+        assertEquals(3, t.v1().clauses().size());
+        TermInSetQuery terms = (TermInSetQuery) t.v1().clauses().get(0).getQuery();
+        assertEquals(1023, terms.getTermData().size());
+        assertThat(t.v1().clauses().get(1).getQuery().toString(), containsString(fieldName + ".range_field:<ranges:"));
+        assertThat(t.v1().clauses().get(2).getQuery().toString(), containsString(fieldName + ".extraction_result:failed"));
     }
 
-    public void testCreateCandidateQuery_numberFields() throws Exception {
+    public void testCreateCandidateQuery_oldIndex() throws Exception {
+        addQueryFieldMappings();
+
+        MemoryIndex memoryIndex = new MemoryIndex(false);
+        memoryIndex.addField("field1", "value1", new WhitespaceAnalyzer());
+        IndexReader indexReader = memoryIndex.createSearcher().getIndexReader();
+
+        Tuple<BooleanQuery, Boolean> t = fieldType.createCandidateQuery(indexReader, Version.CURRENT);
+        assertTrue(t.v2());
+        assertEquals(2, t.v1().clauses().size());
+        assertThat(t.v1().clauses().get(0).getQuery(), instanceOf(CoveringQuery.class));
+        assertThat(t.v1().clauses().get(1).getQuery(), instanceOf(TermQuery.class));
+
+        t = fieldType.createCandidateQuery(indexReader, Version.V_6_0_0);
+        assertTrue(t.v2());
+        assertEquals(2, t.v1().clauses().size());
+        assertThat(t.v1().clauses().get(0).getQuery(), instanceOf(TermInSetQuery.class));
+        assertThat(t.v1().clauses().get(1).getQuery(), instanceOf(TermQuery.class));
+    }
+
+    public void testExtractTermsAndRanges_numberFields() throws Exception {
         addQueryFieldMappings();
 
         MemoryIndex memoryIndex = new MemoryIndex(false);
@@ -385,17 +415,45 @@ public class PercolatorFieldMapperTests extends ESSingleNodeTestCase {
 
         IndexReader indexReader = memoryIndex.createSearcher().getIndexReader();
 
-        Tuple<List<Query>, Boolean> t = fieldType.createCandidateQueryClauses(indexReader);
-        assertThat(t.v2(), is(true));
-        List<Query> clauses = t.v1();
-        assertEquals(7, clauses.size());
-        assertThat(clauses.get(0).toString(), containsString(fieldName + ".range_field:<ranges:[["));
-        assertThat(clauses.get(1).toString(), containsString(fieldName + ".range_field:<ranges:[["));
-        assertThat(clauses.get(2).toString(), containsString(fieldName + ".range_field:<ranges:[["));
-        assertThat(clauses.get(3).toString(), containsString(fieldName + ".range_field:<ranges:[["));
-        assertThat(clauses.get(4).toString(), containsString(fieldName + ".range_field:<ranges:[["));
-        assertThat(clauses.get(5).toString(), containsString(fieldName + ".range_field:<ranges:[["));
-        assertThat(clauses.get(6).toString(), containsString(fieldName + ".range_field:<ranges:[["));
+        Tuple<List<BytesRef>, Map<String, List<byte[]>>> t = fieldType.extractTermsAndRanges(indexReader);
+        assertEquals(0, t.v1().size());
+        Map<String, List<byte[]>> rangesMap = t.v2();
+        assertEquals(7, rangesMap.size());
+
+        List<byte[]> range = rangesMap.get("number_field1");
+        assertNotNull(range);
+        assertEquals(10, IntPoint.decodeDimension(range.get(0), 0));
+        assertEquals(10, IntPoint.decodeDimension(range.get(1), 0));
+
+        range = rangesMap.get("number_field2");
+        assertNotNull(range);
+        assertEquals(20L, LongPoint.decodeDimension(range.get(0), 0));
+        assertEquals(20L, LongPoint.decodeDimension(range.get(1), 0));
+
+        range = rangesMap.get("number_field3");
+        assertNotNull(range);
+        assertEquals(30L, LongPoint.decodeDimension(range.get(0), 0));
+        assertEquals(30L, LongPoint.decodeDimension(range.get(1), 0));
+
+        range = rangesMap.get("number_field4");
+        assertNotNull(range);
+        assertEquals(30F, HalfFloatPoint.decodeDimension(range.get(0), 0), 0F);
+        assertEquals(30F, HalfFloatPoint.decodeDimension(range.get(1), 0), 0F);
+
+        range = rangesMap.get("number_field5");
+        assertNotNull(range);
+        assertEquals(40F, FloatPoint.decodeDimension(range.get(0), 0), 0F);
+        assertEquals(40F, FloatPoint.decodeDimension(range.get(1), 0), 0F);
+
+        range = rangesMap.get("number_field6");
+        assertNotNull(range);
+        assertEquals(50D, DoublePoint.decodeDimension(range.get(0), 0), 0D);
+        assertEquals(50D, DoublePoint.decodeDimension(range.get(1), 0), 0D);
+
+        range = rangesMap.get("number_field7");
+        assertNotNull(range);
+        assertEquals(InetAddresses.forString("192.168.1.12"), InetAddressPoint.decode(range.get(0)));
+        assertEquals(InetAddresses.forString("192.168.1.24"), InetAddressPoint.decode(range.get(1)));
     }
 
     public void testPercolatorFieldMapper() throws Exception {
@@ -522,7 +580,7 @@ public class PercolatorFieldMapperTests extends ESSingleNodeTestCase {
             .startObject("properties").startObject(fieldName).field("type", "percolator").field("index", "no").endObject().endObject()
             .endObject().endObject().string();
         MapperParsingException e = expectThrows(MapperParsingException.class, () ->
-            mapperService.merge("doc", new CompressedXContent(percolatorMapper), MapperService.MergeReason.MAPPING_UPDATE, true));
+            mapperService.merge("doc", new CompressedXContent(percolatorMapper), MapperService.MergeReason.MAPPING_UPDATE));
         assertThat(e.getMessage(), containsString("Mapping definition for [" + fieldName + "] has unsupported parameters:  [index : no]"));
     }
 
@@ -536,7 +594,7 @@ public class PercolatorFieldMapperTests extends ESSingleNodeTestCase {
                     .startObject("query_field2").field("type", "percolator").endObject()
                 .endObject()
                 .endObject().endObject().string();
-        mapperService.merge(typeName, new CompressedXContent(percolatorMapper), MapperService.MergeReason.MAPPING_UPDATE, true);
+        mapperService.merge(typeName, new CompressedXContent(percolatorMapper), MapperService.MergeReason.MAPPING_UPDATE);
 
         QueryBuilder queryBuilder = matchQuery("field", "value");
         ParsedDocument doc = mapperService.documentMapper(typeName).parse(SourceToParse.source("test", typeName, "1",
@@ -567,7 +625,7 @@ public class PercolatorFieldMapperTests extends ESSingleNodeTestCase {
                 .endObject()
                 .endObject()
                 .endObject().endObject().string();
-        mapperService.merge(typeName, new CompressedXContent(percolatorMapper), MapperService.MergeReason.MAPPING_UPDATE, true);
+        mapperService.merge(typeName, new CompressedXContent(percolatorMapper), MapperService.MergeReason.MAPPING_UPDATE);
 
         QueryBuilder queryBuilder = matchQuery("field", "value");
         ParsedDocument doc = mapperService.documentMapper(typeName).parse(SourceToParse.source("test", typeName, "1",
@@ -792,6 +850,79 @@ public class PercolatorFieldMapperTests extends ESSingleNodeTestCase {
                     throw new AssertionError("unexpected encoding type [" + encodingType + "]");
             }
         }
+    }
+
+    public void testDuplicatedClauses() throws Exception {
+        addQueryFieldMappings();
+
+        QueryBuilder qb = boolQuery()
+                .must(boolQuery().must(termQuery("field", "value1")).must(termQuery("field", "value2")))
+                .must(boolQuery().must(termQuery("field", "value2")).must(termQuery("field", "value3")));
+        ParsedDocument doc = mapperService.documentMapper("doc").parse(SourceToParse.source("test", "doc", "1",
+                XContentFactory.jsonBuilder().startObject()
+                        .field(fieldName, qb)
+                        .endObject().bytes(),
+                XContentType.JSON));
+
+        List<String> values = Arrays.stream(doc.rootDoc().getFields(fieldType.queryTermsField.name()))
+                .map(f -> f.binaryValue().utf8ToString())
+                .sorted()
+                .collect(Collectors.toList());
+        assertThat(values.size(), equalTo(3));
+        assertThat(values.get(0), equalTo("field\0value1"));
+        assertThat(values.get(1), equalTo("field\0value2"));
+        assertThat(values.get(2), equalTo("field\0value3"));
+        int msm = doc.rootDoc().getFields(fieldType.minimumShouldMatchField.name())[0].numericValue().intValue();
+        assertThat(msm, equalTo(3));
+
+        qb = boolQuery()
+                .must(boolQuery().must(termQuery("field", "value1")).must(termQuery("field", "value2")))
+                .must(boolQuery().must(termQuery("field", "value2")).must(termQuery("field", "value3")))
+                .must(boolQuery().must(termQuery("field", "value3")).must(termQuery("field", "value4")))
+                .must(boolQuery().should(termQuery("field", "value4")).should(termQuery("field", "value5")));
+        doc = mapperService.documentMapper("doc").parse(SourceToParse.source("test", "doc", "1",
+                XContentFactory.jsonBuilder().startObject()
+                        .field(fieldName, qb)
+                        .endObject().bytes(),
+                XContentType.JSON));
+
+        values = Arrays.stream(doc.rootDoc().getFields(fieldType.queryTermsField.name()))
+                .map(f -> f.binaryValue().utf8ToString())
+                .sorted()
+                .collect(Collectors.toList());
+        assertThat(values.size(), equalTo(5));
+        assertThat(values.get(0), equalTo("field\0value1"));
+        assertThat(values.get(1), equalTo("field\0value2"));
+        assertThat(values.get(2), equalTo("field\0value3"));
+        assertThat(values.get(3), equalTo("field\0value4"));
+        assertThat(values.get(4), equalTo("field\0value5"));
+        msm = doc.rootDoc().getFields(fieldType.minimumShouldMatchField.name())[0].numericValue().intValue();
+        assertThat(msm, equalTo(4));
+
+        qb = boolQuery()
+                .minimumShouldMatch(3)
+                .should(boolQuery().should(termQuery("field", "value1")).should(termQuery("field", "value2")))
+                .should(boolQuery().should(termQuery("field", "value2")).should(termQuery("field", "value3")))
+                .should(boolQuery().should(termQuery("field", "value3")).should(termQuery("field", "value4")))
+                .should(boolQuery().should(termQuery("field", "value4")).should(termQuery("field", "value5")));
+        doc = mapperService.documentMapper("doc").parse(SourceToParse.source("test", "doc", "1",
+                XContentFactory.jsonBuilder().startObject()
+                        .field(fieldName, qb)
+                        .endObject().bytes(),
+                XContentType.JSON));
+
+        values = Arrays.stream(doc.rootDoc().getFields(fieldType.queryTermsField.name()))
+                .map(f -> f.binaryValue().utf8ToString())
+                .sorted()
+                .collect(Collectors.toList());
+        assertThat(values.size(), equalTo(5));
+        assertThat(values.get(0), equalTo("field\0value1"));
+        assertThat(values.get(1), equalTo("field\0value2"));
+        assertThat(values.get(2), equalTo("field\0value3"));
+        assertThat(values.get(3), equalTo("field\0value4"));
+        assertThat(values.get(4), equalTo("field\0value5"));
+        msm = doc.rootDoc().getFields(fieldType.minimumShouldMatchField.name())[0].numericValue().intValue();
+        assertThat(msm, equalTo(3));
     }
 
     private static byte[] subByteArray(byte[] source, int offset, int length) {
