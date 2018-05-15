@@ -146,7 +146,7 @@ subprojects {
     configure(extensions.findByName("${baseName}#oldClusterTestCluster")) {
       dependsOn copyTestNodeKeystore
       if (version.before('6.3.0')) {
-        plugin xpackProject('plugin').path
+        mavenPlugin 'x-pack', "org.elasticsearch.plugin:x-pack:${version}"
       }
       bwcVersion = version
       numBwcNodes = 2
@@ -163,7 +163,7 @@ subprojects {
       setting 'logger.level', 'DEBUG'
 
       setting 'xpack.security.enabled', 'true'
-      setting 'xpack.security.transport.ssl.enabled', 'true'
+      setting 'xpack.security.transport.ssl.enabled', version.onOrAfter("5.2.0").toString()
       setting 'xpack.ssl.keystore.path', 'testnode.jks'
       setting 'xpack.ssl.keystore.password', 'testnode'
       if (version.onOrAfter('6.3.0')) {

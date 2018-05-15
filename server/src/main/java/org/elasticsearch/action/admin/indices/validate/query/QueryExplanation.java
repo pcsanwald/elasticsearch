@@ -75,7 +75,11 @@ public class QueryExplanation  implements Streamable {
 
     @Override
     public void readFrom(StreamInput in) throws IOException {
+<<<<<<< HEAD
         if (in.getVersion().onOrAfter(Version.V_7_0_0_alpha1)) {
+=======
+        if (in.getVersion().onOrAfter(Version.V_6_4_0)) {
+>>>>>>> 67902b2728f4d67cb1981c17f1be0b2d9df1b8aa
             index = in.readOptionalString();
         } else {
             index = in.readString();
@@ -92,7 +96,11 @@ public class QueryExplanation  implements Streamable {
 
     @Override
     public void writeTo(StreamOutput out) throws IOException {
+<<<<<<< HEAD
         if (out.getVersion().onOrAfter(Version.V_7_0_0_alpha1)) {
+=======
+        if (out.getVersion().onOrAfter(Version.V_6_4_0)) {
+>>>>>>> 67902b2728f4d67cb1981c17f1be0b2d9df1b8aa
             out.writeOptionalString(index);
         } else {
             out.writeString(index);
